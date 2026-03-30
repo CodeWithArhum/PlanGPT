@@ -106,7 +106,7 @@ function parseDurMins(dur: string): number {
   return total || 30;
 }
 
-function recalcDayTimes(blocks: Block[], prayers: Record<string, string>): Block[] {
+function recalcDayTimes(blocks: Block[]): Block[] {
   const prayerBlocks = blocks.filter(b => b.category === "prayer")
     .sort((a, b) => parseMins(a.time) - parseMins(b.time));
   const nonPrayer = blocks.filter(b => b.category !== "prayer");
@@ -368,7 +368,7 @@ export default function PlanGPT() {
     if (aIdx === -1 || oIdx === -1) return;
     if (dayBlocks[aIdx].category === "prayer") return;
     const moved   = arrayMove(dayBlocks, aIdx, oIdx);
-    const recalcd = recalcDayTimes(moved, prayerTimes);
+    const recalcd = recalcDayTimes(moved);
     // Remap completion keys by title to preserve checked state
     const newCD: CompletionData = { ...completionData };
     const titleDone: Record<string, boolean> = {};
