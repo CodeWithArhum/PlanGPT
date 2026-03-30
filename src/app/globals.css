@@ -25,3 +25,14 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: theme('colors.surfaceSecondary');
 }
+
+@keyframes flash-border {
+  0%   { border-left-color: transparent; box-shadow: none; }
+  15%  { border-left-color: #a3e635; box-shadow: -3px 0 8px rgba(163,230,53,0.4); }
+  85%  { border-left-color: #a3e635; box-shadow: -3px 0 8px rgba(163,230,53,0.4); }
+  100% { border-left-color: transparent; box-shadow: none; }
+}
+.animate-flash-border {
+  animation: flash-border 1.2s ease forwards;
+  border-left-width: 3px !important;
+}

@@ -4,9 +4,17 @@ import { useState, useEffect } from "react";
 import {
   Lock, Unlock, Plus, Trash2, Zap, Loader2, AlertTriangle,
   CheckCircle2, Settings, History, X, RotateCcw, ChevronUp,
-  ArrowLeft,
+  ArrowLeft, GripVertical,
 } from "lucide-react";
 import clsx from "clsx";
+import {
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove, SortableContext, useSortable, verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -71,6 +79,109 @@ function getWeekLabel(d: Date) {
   return `Week of ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
 }
 
+// ─── Time helpers (pure) ─────────────────────────────────────────────────────
+
+function parseMins(t: string): number {
+  const m = t.match(/(\d+):(\d+)\s*(AM|PM)/i);
+  if (!m) return 0;
+  let h = parseInt(m[1]); const min = parseInt(m[2]); const ap = m[3].toUpperCase();
+  if (ap === "PM" && h !== 12) h += 12;
+  if (ap === "AM" && h === 12) h = 0;
+  return h * 60 + min;
+}
+
+function formatMins(mins: number): string {
+  mins = ((mins % 1440) + 1440) % 1440;
+  const h = Math.floor(mins / 60); const m = mins % 60;
+  const ap = h >= 12 ? "PM" : "AM"; const hh = h % 12 || 12;
+  return `${hh}:${m.toString().padStart(2, "0")} ${ap}`;
+}
+
+function parseDurMins(dur: string): number {
+  let total = 0;
+  const h = dur.match(/(\d+)\s*h/i); const m = dur.match(/(\d+)\s*min/i);
+  if (h) total += parseInt(h[1]) * 60;
+  if (m) total += parseInt(m[1]);
+  if (!h && !m) { const n = dur.match(/(\d+)/); if (n) total = parseInt(n[1]); }
+  return total || 30;
+}
+
+function recalcDayTimes(blocks: Block[], prayers: Record<string, string>): Block[] {
+  const prayerBlocks = blocks.filter(b => b.category === "prayer")
+    .sort((a, b) => parseMins(a.time) - parseMins(b.time));
+  const nonPrayer = blocks.filter(b => b.category !== "prayer");
+  if (nonPrayer.length === 0) return blocks;
+
+  const anchor = parseMins(blocks[0].time);
+  let cur = anchor;
+  let pi = 0;
+  const result: Block[] = [];
+
+  for (const block of nonPrayer) {
+    const dur = parseDurMins(block.duration);
+    while (pi < prayerBlocks.length) {
+      const pt = parseMins(prayerBlocks[pi].time);
+      if (pt <= cur + dur) {
+        if (pt > cur) cur = pt;
+        result.push(prayerBlocks[pi]);
+        cur = pt + parseDurMins(prayerBlocks[pi].duration || "15 min") + 10;
+        pi++;
+      } else break;
+    }
+    result.push({ ...block, time: formatMins(cur) });
+    cur += dur + 10;
+  }
+  while (pi < prayerBlocks.length) { result.push(prayerBlocks[pi]); pi++; }
+  return result;
+}
+
+// ─── SortableBlock component ─────────────────────────────────────────────────
+
+interface SortableBlockProps {
+  id: string; block: Block; isDone: boolean;
+  isRecentlyChanged: boolean;
+  onToggle: () => void;
+  getTagColor: (cat: Category) => { wrapper: string; strip: string };
+}
+
+function SortableBlock({ id, block, isDone, isRecentlyChanged, onToggle, getTagColor }: SortableBlockProps) {
+  const isPrayer = block.category === "prayer";
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled: isPrayer });
+  const style = { transform: CSS.Transform.toString(transform), transition: transition ?? "150ms ease", opacity: isDragging ? 0.5 : 1 };
+
+  return (
+    <div ref={setNodeRef} style={style} onClick={!isDragging ? onToggle : undefined}
+      className={clsx(
+        "group bg-background border border-border p-2.5 rounded-lg relative overflow-hidden transition-colors duration-200 select-none",
+        isDone && "opacity-40",
+        !isPrayer && "cursor-pointer hover:border-primary/30",
+        isRecentlyChanged && "animate-flash-border"
+      )}>
+      <div className={clsx("absolute top-0 left-0 w-1 h-full", getTagColor(block.category).strip)} />
+      <div className="flex items-start gap-1 pl-2">
+        <div {...(!isPrayer ? { ...attributes, ...listeners } : {})} onClick={e => e.stopPropagation()}
+          className={clsx("flex-shrink-0 mt-0.5 w-5 flex items-center justify-center",
+            isPrayer ? "text-textMuted opacity-40 cursor-not-allowed"
+              : "text-textMuted opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing hover:text-primary transition-opacity")}>
+          {isPrayer ? <Lock size={11} /> : <GripVertical size={14} />}
+        </div>
+        <div className={clsx("flex-shrink-0 mt-0.5 w-4 h-4 rounded border-2 flex items-center justify-center transition-all",
+          isDone ? "bg-primary border-primary" : "border-primary/40 bg-transparent")}>
+          {isDone && <svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4L3.5 6.5L9 1" stroke="#0A0A0A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex justify-between items-start mb-0.5">
+            <span className="text-[11px] font-bold text-textMuted">{block.time}</span>
+            <span className={clsx("text-[9px] uppercase font-bold px-1 py-0.5 rounded border", getTagColor(block.category).wrapper)}>{block.category}</span>
+          </div>
+          <h4 className={clsx("text-sm font-bold leading-tight", isDone && "line-through text-textMuted")}>{block.title}</h4>
+          <span className="text-[11px] text-textMuted">{block.duration}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function PlanGPT() {
@@ -82,7 +193,7 @@ export default function PlanGPT() {
   const [wakeup, setWakeup]         = useState<string>(() => loadLS("plangpt_wakeup", "5:00 AM"));
   const [sleep, setSleep]           = useState<string>(() => loadLS("plangpt_sleep", "12:00 AM"));
   const [selectedModel, setSelectedModel] = useState<string>(() => loadLS("plangpt_model", "gpt-4o"));
-  const [schedule, setSchedule]     = useState<WeekSchedule | null>(() => loadLS("plangpt_schedule", null));
+  const [schedule, setSchedule]     = useState<WeekSchedule | null>(() => loadLS("plangpt_current_week", null) ?? loadLS("plangpt_schedule", null));
   const [lockedDays, setLockedDays] = useState<Set<string>>(() => new Set(loadLS<string[]>("plangpt_locked", [])));
   const [isLoading, setIsLoading]   = useState(false);
   const [error, setError]           = useState<string | null>(null);
@@ -99,8 +210,14 @@ export default function PlanGPT() {
   const [reviewWeek, setReviewWeek] = useState<HistoryWeek | null>(null);
 
   // ── Mode ──
-  const [mode, setMode]             = useState<AppMode>(() => loadLS("plangpt_schedule", null) ? "week" : "setup");
+  const [mode, setMode]             = useState<AppMode>(() => (loadLS<WeekSchedule|null>("plangpt_current_week", null) ?? loadLS<WeekSchedule|null>("plangpt_schedule", null)) ? "week" : "setup");
   const [showSettings, setShowSettings] = useState(false);
+
+  // ── Drag & drop ──
+  const [originalSchedule, setOriginalSchedule] = useState<WeekSchedule | null>(() => loadLS("plangpt_original_week", null));
+  const [modifiedDays, setModifiedDays]         = useState<Set<string>>(() => new Set(loadLS<string[]>("plangpt_modified_days", [])));
+  const [recentlyChanged, setRecentlyChanged]   = useState<Set<string>>(new Set());
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
   // ── Bottom drawer (mid-week re-plan) ──
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -120,7 +237,9 @@ export default function PlanGPT() {
   useEffect(() => setMounted(true), []);
 
   // ── Persist ──
-  useEffect(() => { localStorage.setItem("plangpt_schedule",  JSON.stringify(schedule)); }, [schedule]);
+  useEffect(() => { localStorage.setItem("plangpt_current_week",  JSON.stringify(schedule)); }, [schedule]);
+  useEffect(() => { localStorage.setItem("plangpt_original_week", JSON.stringify(originalSchedule)); }, [originalSchedule]);
+  useEffect(() => { localStorage.setItem("plangpt_modified_days", JSON.stringify(Array.from(modifiedDays))); }, [modifiedDays]);
   useEffect(() => { localStorage.setItem("plangpt_locked",    JSON.stringify(Array.from(lockedDays))); }, [lockedDays]);
   useEffect(() => { localStorage.setItem("plangpt_tasks",     JSON.stringify(tasks)); }, [tasks]);
   useEffect(() => { localStorage.setItem("plangpt_prayers",   JSON.stringify(prayerTimes)); }, [prayerTimes]);
@@ -201,7 +320,10 @@ export default function PlanGPT() {
         setSchedule(merged);
         setMwName(""); setMwMins(30); setDrawerOpen(false);
       } else {
-        setSchedule(data.week || null);
+        const freshWeek = data.week || null;
+        setSchedule(freshWeek);
+        setOriginalSchedule(freshWeek);
+        setModifiedDays(new Set());
         setMode("week"); // → switch to week view
       }
     } catch (err: unknown) {
@@ -235,6 +357,43 @@ export default function PlanGPT() {
       case "break":               return { wrapper: "bg-calBreak/20 text-calBreak border-calBreak/30",          strip: "bg-calBreak" };
       default:                    return { wrapper: "bg-surfaceSecondary text-textMain",                         strip: "bg-border" };
     }
+  };
+
+  const handleDragEnd = (day: string, event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id || !schedule) return;
+    const dayBlocks = schedule[day]?.blocks || [];
+    const aIdx = dayBlocks.findIndex((_, i) => `${day}-${i}` === active.id);
+    const oIdx = dayBlocks.findIndex((_, i) => `${day}-${i}` === over.id);
+    if (aIdx === -1 || oIdx === -1) return;
+    if (dayBlocks[aIdx].category === "prayer") return;
+    const moved   = arrayMove(dayBlocks, aIdx, oIdx);
+    const recalcd = recalcDayTimes(moved, prayerTimes);
+    // Remap completion keys by title to preserve checked state
+    const newCD: CompletionData = { ...completionData };
+    const titleDone: Record<string, boolean> = {};
+    dayBlocks.forEach((b, i) => { titleDone[`${day}||${b.title}`] = !!completionData[`${day}-${i}`]; });
+    dayBlocks.forEach((_, i) => { delete newCD[`${day}-${i}`]; });
+    recalcd.forEach((b, i) => { if (titleDone[`${day}||${b.title}`]) newCD[`${day}-${i}`] = true; });
+    // Build the updated full schedule and persist directly (don't rely on async effect alone)
+    const updatedSchedule = { ...schedule, [day]: { ...schedule[day], blocks: recalcd } };
+    localStorage.setItem("plangpt_current_week", JSON.stringify(updatedSchedule));
+    localStorage.setItem(`plangpt_completion_${completionKey}`, JSON.stringify(newCD));
+    const newModified = new Set(Array.from(modifiedDays).concat(day));
+    localStorage.setItem("plangpt_modified_days", JSON.stringify(Array.from(newModified)));
+    setCompletionData(newCD);
+    setSchedule(updatedSchedule);
+    setModifiedDays(newModified);
+    const changed = new Set<string>();
+    recalcd.forEach((b, i) => { if (b.time !== dayBlocks[i]?.time) changed.add(`${day}-${i}`); });
+    setRecentlyChanged(changed);
+    setTimeout(() => setRecentlyChanged(new Set()), 1300);
+  };
+
+  const resetDay = (day: string) => {
+    if (!originalSchedule?.[day]) return;
+    setSchedule(prev => prev ? { ...prev, [day]: originalSchedule![day] } : prev);
+    setModifiedDays(prev => { const n = new Set(prev); n.delete(day); return n; });
   };
 
   const displaySchedule  = reviewWeek?.schedule     ?? schedule;
@@ -545,14 +704,25 @@ export default function PlanGPT() {
                         {day}
                         {isToday && <span className="text-[10px] bg-primary text-background px-1.5 py-0.5 rounded font-bold">TODAY</span>}
                         {isLocked && <Lock size={12} className="text-primary" />}
+                        {!reviewWeek && modifiedDays.has(day) && (
+                          <span className="text-[9px] bg-amber-500/20 text-amber-400 border border-amber-500/30 px-1.5 py-0.5 rounded font-bold">Modified</span>
+                        )}
                       </h3>
-                      {!reviewWeek && (
-                        <button onClick={() => toggleLock(day)}
-                          className={clsx("p-1.5 rounded-full transition-colors",
-                            isLocked ? "bg-primary text-background" : "bg-background border border-border text-textMuted hover:border-primary/50 hover:text-primary")}>
-                          {isLocked ? <Lock size={13} /> : <Unlock size={13} />}
-                        </button>
-                      )}
+                      <div className="flex items-center gap-1">
+                        {!reviewWeek && modifiedDays.has(day) && (
+                          <button onClick={() => resetDay(day)}
+                            className="text-[10px] text-amber-400 border border-amber-500/30 hover:bg-amber-500/10 px-2 py-1 rounded transition-colors flex items-center gap-1">
+                            <RotateCcw size={10} /> Reset
+                          </button>
+                        )}
+                        {!reviewWeek && (
+                          <button onClick={() => toggleLock(day)}
+                            className={clsx("p-1.5 rounded-full transition-colors",
+                              isLocked ? "bg-primary text-background" : "bg-background border border-border text-textMuted hover:border-primary/50 hover:text-primary")}>
+                            {isLocked ? <Lock size={13} /> : <Unlock size={13} />}
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
                       {dayData && typeof dayData.productive_hours === "number" && (
@@ -572,18 +742,13 @@ export default function PlanGPT() {
                   {/* Blocks */}
                   <div className="flex-1 overflow-y-auto p-2.5 space-y-2 relative">
                     {isLocked && !reviewWeek && <div className="absolute inset-0 z-10" />}
-                    {blocks.map((block, idx) => {
+                    {reviewWeek ? blocks.map((block, idx) => {
                       const isDone = !!displayCompletion[`${day}-${idx}`];
                       return (
-                        <div key={idx} onClick={() => !reviewWeek && toggleBlock(day, idx)}
-                          className={clsx("bg-background border border-border p-2.5 rounded-lg relative overflow-hidden transition-all duration-200",
-                            isDone && "opacity-40",
-                            !reviewWeek && "cursor-pointer hover:border-primary/30"
-                          )}>
+                        <div key={idx} className={clsx("bg-background border border-border p-2.5 rounded-lg relative overflow-hidden", isDone && "opacity-40")}>
                           <div className={clsx("absolute top-0 left-0 w-1 h-full", getTagColor(block.category).strip)} />
                           <div className="flex items-start gap-2 pl-2">
-                            <div className={clsx("flex-shrink-0 mt-0.5 w-4 h-4 rounded border-2 flex items-center justify-center transition-all",
-                              isDone ? "bg-primary border-primary" : "border-primary/40 bg-transparent")}>
+                            <div className={clsx("flex-shrink-0 mt-0.5 w-4 h-4 rounded border-2 flex items-center justify-center", isDone ? "bg-primary border-primary" : "border-primary/40 bg-transparent")}>
                               {isDone && <svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4L3.5 6.5L9 1" stroke="#0A0A0A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>}
                             </div>
                             <div className="flex-1 min-w-0">
@@ -597,7 +762,23 @@ export default function PlanGPT() {
                           </div>
                         </div>
                       );
-                    })}
+                    }) : (
+                      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={e => handleDragEnd(day, e)}>
+                        <SortableContext items={blocks.map((_, i) => `${day}-${i}`)} strategy={verticalListSortingStrategy}>
+                          {blocks.map((block, idx) => {
+                            const blockId = `${day}-${idx}`;
+                            return (
+                              <SortableBlock key={blockId} id={blockId} block={block}
+                                isDone={!!displayCompletion[blockId]}
+                                isRecentlyChanged={recentlyChanged.has(blockId)}
+                                onToggle={() => toggleBlock(day, idx)}
+                                getTagColor={getTagColor}
+                              />
+                            );
+                          })}
+                        </SortableContext>
+                      </DndContext>
+                    )}
                     {blocks.length === 0 && (
                       <div className="text-center py-8 text-textMuted text-xs border border-dashed border-border rounded">Rest day</div>
                     )}
