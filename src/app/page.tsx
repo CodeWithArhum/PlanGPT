@@ -125,12 +125,24 @@ interface SortableBlockProps {
   id: string; block: Block; isDone: boolean;
   isRecentlyChanged: boolean;
   onToggle: () => void;
+  onEditTitle?: (newTitle: string) => void;
   getTagColor: (cat: Category) => { wrapper: string; strip: string };
 }
 
-function SortableBlock({ id, block, isDone, isRecentlyChanged, onToggle, getTagColor }: SortableBlockProps) {
+function SortableBlock({ id, block, isDone, isRecentlyChanged, onToggle, onEditTitle, getTagColor }: SortableBlockProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
   const style = { transform: CSS.Transform.toString(transform), transition: transition ?? "150ms ease", opacity: isDragging ? 0.5 : 1 };
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(block.title);
+
+  const handleEditSubmit = (e?: React.FormEvent | React.FocusEvent) => {
+    e?.preventDefault();
+    if (draftTitle.trim() && draftTitle.trim() !== block.title) {
+      onEditTitle?.(draftTitle.trim());
+    }
+    setIsEditing(false);
+  };
 
   return (
     <div ref={setNodeRef} style={style} onClick={!isDragging ? onToggle : undefined}
@@ -155,7 +167,34 @@ function SortableBlock({ id, block, isDone, isRecentlyChanged, onToggle, getTagC
             <span className="text-[11px] font-bold text-textMuted">{block.time}</span>
             <span className={clsx("text-[9px] uppercase font-bold px-1 py-0.5 rounded border", getTagColor(block.category).wrapper)}>{block.category}</span>
           </div>
-          <h4 className={clsx("text-sm font-bold leading-tight", isDone && "line-through text-textMuted")}>{block.title}</h4>
+          {isEditing ? (
+            <input
+              autoFocus
+              value={draftTitle}
+              onChange={e => setDraftTitle(e.target.value)}
+              onBlur={handleEditSubmit}
+              onKeyDown={e => {
+                if (e.key === "Enter") handleEditSubmit(e);
+                if (e.key === "Escape") { setIsEditing(false); setDraftTitle(block.title); }
+              }}
+              onClick={e => e.stopPropagation()}
+              className="text-sm font-bold leading-tight bg-background border-b border-primary/50 outline-none w-full"
+            />
+          ) : (
+            <h4 
+              onClick={(e) => { 
+                if (onEditTitle) { 
+                  e.stopPropagation(); 
+                  setIsEditing(true); 
+                  setDraftTitle(block.title); 
+                } 
+              }}
+              className={clsx("text-sm font-bold leading-tight", onEditTitle && "cursor-text hover:text-primary transition-colors", isDone && "line-through text-textMuted")}
+              title={onEditTitle ? "Click to edit title" : undefined}
+            >
+              {block.title}
+            </h4>
+          )}
           <span className="text-[11px] text-textMuted">{block.duration}</span>
         </div>
       </div>
@@ -384,6 +423,22 @@ export default function PlanGPT() {
     recalcd.forEach((b, i) => { if (b.time !== dayBlocks[i]?.time) changed.add(`${day}-${i}`); });
     setRecentlyChanged(changed);
     setTimeout(() => setRecentlyChanged(new Set()), 1300);
+  };
+
+  const editBlockTitle = (day: string, idx: number, newTitle: string) => {
+    if (!schedule) return;
+    const newBlocks = [...schedule[day].blocks];
+    if (newBlocks[idx].title === newTitle) return;
+    
+    newBlocks[idx] = { ...newBlocks[idx], title: newTitle };
+    const newSchedule = { ...schedule, [day]: { ...schedule[day], blocks: newBlocks } };
+    
+    // Record modified day
+    const newModified = new Set(modifiedDays);
+    newModified.add(day);
+    
+    setSchedule(newSchedule);
+    setModifiedDays(newModified);
   };
 
   const resetDay = (day: string) => {
@@ -788,6 +843,7 @@ export default function PlanGPT() {
                                 isDone={!!displayCompletion[blockId]}
                                 isRecentlyChanged={recentlyChanged.has(blockId)}
                                 onToggle={() => toggleBlock(day, idx)}
+                                onEditTitle={(newTitle) => editBlockTitle(day, idx, newTitle)}
                                 getTagColor={getTagColor}
                               />
                             );
